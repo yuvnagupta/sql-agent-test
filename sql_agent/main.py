@@ -1,4 +1,3 @@
-
 # sql_agent/main.py
 
 import asyncio
@@ -7,13 +6,19 @@ from typing import Any, Dict, Literal
 
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
-from langchain_community.utilities import SQLDatabase
-from langchain_core.agents import AgentAction, AgentFinish
-from langchain_core.messages import HumanMessage
+# Removed: from langchain_community.utilities import SQLDatabase
+# Removed: from sqlalchemy import text
 from langchain_core.prompts import PromptTemplate
 from pathlib import Path
 from pydantic import BaseModel
-from sqlalchemy import text
+# Removed: from langchain_community.agent_toolkits import SQLDatabaseToolkit
+# Removed: from langchain_core.agents import AgentAction, AgentFinish
+# Removed: from langchain_core.messages import HumanMessage
+
+# --- LangGraph specific imports ---
+from langgraph.graph import StateGraph, END # Use END for a simple direct path
+#from langgraph.graph.graph import CompiledGraph
+from typing_extensions import TypedDict
 
 # Load environment variables from .env file
 load_dotenv()
@@ -23,11 +28,15 @@ class AgentOutput(BaseModel):
     task_status: Literal["completed", "input_required", "error"]
     response: str
 
+# --- Graph State Definition ---
+class AgentState(TypedDict):
+    """Represents the state of our LangGraph agent."""
+    query: str
+    response: str
+    error: str
+
 # --- Agent Initialization (Module-level for Workflow Server) ---
 
-# Initialize Azure-hosted OpenAI chat model from environment variables
-# This will pick up AZURE_OPENAI_DEPLOYMENT_NAME, AZURE_OPENAI_ENDPOINT, etc.
-# from your Docker Compose environment or local .env file.
 llm = AzureChatOpenAI(
     deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
     azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
@@ -36,105 +45,186 @@ llm = AzureChatOpenAI(
     temperature=0,
 )
 
-# Initialize SQLite database
-# Ensure Chinook.db is in the same directory as this main.py file
-db = SQLDatabase.from_uri(f"sqlite:///{Path(__file__).parent}/Chinook.db")
+# --- IN-MEMORY TOY DATABASE ---
+# This replaces the Chinook.db connection
+TOY_DATABASE_SCHEMA = """
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    age INTEGER,
+    city TEXT
+);
 
-# --- Simple LLM-to-Table QA Function ---
-SMALL_TABLE = '''
-| Name     | Age | City      |
-|----------|-----|-----------|
-| Alice    | 30  | New York  |
-| Bob      | 25  | Chicago   |
-| Charlie  | 35  | San Diego |
-'''
+CREATE TABLE products (
+    product_id INTEGER PRIMARY KEY,
+    product_name TEXT NOT NULL,
+    price REAL,
+    stock INTEGER
+);
 
-async def table_qa_agent(input_data: Dict[str, Any]) -> AgentOutput:
+-- Sample Data (for reference, actual data handled in the code below)
+INSERT INTO users (id, name, age, city) VALUES (1, 'Alice', 30, 'New York');
+INSERT INTO users (id, name, age, city) VALUES (2, 'Bob', 24, 'Los Angeles');
+INSERT INTO users (id, name, age, city) VALUES (3, 'Charlie', 35, 'New York');
+INSERT INTO products (product_id, product_name, price, stock) VALUES (101, 'Laptop', 1200.00, 50);
+INSERT INTO products (product_id, product_name, price, stock) VALUES (102, 'Mouse', 25.00, 200);
+"""
+
+# Simple in-memory data for the toy database
+TOY_DATABASE_DATA = {
+    "users": [
+        {"id": 1, "name": "Alice", "age": 30, "city": "New York"},
+        {"id": 2, "name": "Bob", "age": 24, "city": "Los Angeles"},
+        {"id": 3, "name": "Charlie", "age": 35, "city": "New York"},
+    ],
+    "products": [
+        {"product_id": 101, "product_name": "Laptop", "price": 1200.00, "stock": 50},
+        {"product_id": 102, "product_name": "Mouse", "price": 25.00, "stock": 200},
+    ]
+}
+
+# --- Mock SQL Execution Function ---
+# This simulates executing SQL queries against the toy data
+def execute_toy_sql(sql_query: str) -> str:
+    """A very basic mock SQL executor for the toy database."""
+    sql_query = sql_query.lower().strip()
+
+    # Simple SELECT * FROM users/products logic for demonstration
+    if "select * from users" in sql_query:
+        headers = ["id", "name", "age", "city"]
+        data = TOY_DATABASE_DATA["users"]
+    elif "select * from products" in sql_query:
+        headers = ["product_id", "product_name", "price", "stock"]
+        data = TOY_DATABASE_DATA["products"]
+    elif "select name from users" in sql_query or "select * from users limit" in sql_query:
+        # Example for specific column/limit queries
+        headers = ["name"]
+        data = [{"name": u["name"]} for u in TOY_DATABASE_DATA["users"]]
+        if "limit 1" in sql_query: data = data[:1]
+        elif "limit 2" in sql_query: data = data[:2]
+        elif "limit 3" in sql_query: data = data[:3]
+    elif "select product_name from products" in sql_query:
+        headers = ["product_name"]
+        data = [{"product_name": p["product_name"]} for p in TOY_DATABASE_DATA["products"]]
+    else:
+        return "ERROR: Query not supported by toy database mock, or invalid SQL."
+
+    # Format output as a simple table string
+    header_str = "\t".join(headers)
+    rows_str = "\n".join(["\t".join(map(str, row.values())) for row in data])
+    return f"{header_str}\n{rows_str}"
+
+
+# --- LangGraph Node ---
+async def generate_and_execute_sql(state: AgentState) -> AgentState:
     """
-    Simple QA: LLM answers questions about a small table (no SQL).
-    input_data is expected to contain a 'query' field.
+    LangGraph node: Takes a natural language query and outputs the answer based only on the simple table in the system prompt.
     """
-    query = input_data.get("query")
-    if not query:
-        return AgentOutput(task_status="error", response="Input missing 'query' field.")
+    query = state["query"]
+
+    # Define a simple table (3 rows, 3 columns) as a string for the system prompt
+    table = (
+        "| id | name   | age | city        |\n"
+        "|----|--------|-----|-------------|\n"
+        "| 1  | Alice  | 30  | New York    |\n"
+        "| 2  | Bob    | 24  | Los Angeles |\n"
+        "| 3  | Charlie| 35  | New York    |"
+    )
+
     prompt = f"""
-You are a helpful assistant. Here is a table:
-{SMALL_TABLE}
-Answer the following question using only the data in the table. Be concise.
+You are a helpful assistant. Here is a table you can use to answer questions:
+
+{table}
+
+Answer the following question using only the information in the table above. If the answer is not present, say 'I don't know'.
+
 Question: {query}
 Answer:
 """
     try:
         llm_response = llm.invoke(prompt)
-        return AgentOutput(task_status="completed", response=llm_response.content.strip())
+        answer = llm_response.content.strip()
+        return {"response": answer, "query": query, "error": ""}
     except Exception as e:
-        return AgentOutput(task_status="error", response=f"Failed: {str(e)}")
+        return {"response": "", "query": query, "error": f"LLM failed: {str(e)}"}
 
-# --- Simple LLM-to-SQL Function ---
-CHINOOK_SCHEMA = '''
-CREATE TABLE [Album]( [AlbumId] INTEGER NOT NULL, [Title] NVARCHAR(160) NOT NULL, [ArtistId] INTEGER NOT NULL, PRIMARY KEY ([AlbumId]), FOREIGN KEY ([ArtistId]) REFERENCES [Artist] ([ArtistId]));
-CREATE TABLE [Artist]( [ArtistId] INTEGER NOT NULL, [Name] NVARCHAR(120), PRIMARY KEY ([ArtistId]));
-CREATE TABLE [Customer]( [CustomerId] INTEGER NOT NULL, [FirstName] NVARCHAR(40) NOT NULL, [LastName] NVARCHAR(20) NOT NULL, [Company] NVARCHAR(80), [Address] NVARCHAR(70), [City] NVARCHAR(40), [State] NVARCHAR(40), [Country] NVARCHAR(40), [PostalCode] NVARCHAR(10), [Phone] NVARCHAR(24), [Fax] NVARCHAR(24), [Email] NVARCHAR(60) NOT NULL, [SupportRepId] INTEGER, PRIMARY KEY ([CustomerId]), FOREIGN KEY ([SupportRepId]) REFERENCES [Employee] ([EmployeeId]));
-CREATE TABLE [Employee]( [EmployeeId] INTEGER NOT NULL, [LastName] NVARCHAR(20) NOT NULL, [FirstName] NVARCHAR(20) NOT NULL, [Title] NVARCHAR(30), [ReportsTo] INTEGER, [BirthDate] DATETIME, [HireDate] DATETIME, [Address] NVARCHAR(70), [City] NVARCHAR(40), [State] NVARCHAR(40), [Country] NVARCHAR(40), [PostalCode] NVARCHAR(10), [Phone] NVARCHAR(24), [Fax] NVARCHAR(24), [Email] NVARCHAR(60), PRIMARY KEY ([EmployeeId]), FOREIGN KEY ([ReportsTo]) REFERENCES [Employee] ([EmployeeId]));
-CREATE TABLE [Genre]( [GenreId] INTEGER NOT NULL, [Name] NVARCHAR(120), PRIMARY KEY ([GenreId]));
-CREATE TABLE [Invoice]( [InvoiceId] INTEGER NOT NULL, [CustomerId] INTEGER NOT NULL, [InvoiceDate] DATETIME NOT NULL, [BillingAddress] NVARCHAR(70), [BillingCity] NVARCHAR(40), [BillingState] NVARCHAR(40), [BillingCountry] NVARCHAR(40), [BillingPostalCode] NVARCHAR(10), [Total] NUMERIC(10,2) NOT NULL, PRIMARY KEY ([InvoiceId]), FOREIGN KEY ([CustomerId]) REFERENCES [Customer] ([CustomerId]));
-CREATE TABLE [InvoiceLine]( [InvoiceLineId] INTEGER NOT NULL, [InvoiceId] INTEGER NOT NULL, [TrackId] INTEGER NOT NULL, [UnitPrice] NUMERIC(10,2) NOT NULL, [Quantity] INTEGER NOT NULL, PRIMARY KEY ([InvoiceLineId]), FOREIGN KEY ([InvoiceId]) REFERENCES [Invoice] ([InvoiceId]), FOREIGN KEY ([TrackId]) REFERENCES [Track] ([TrackId]));
-CREATE TABLE [MediaType]( [MediaTypeId] INTEGER NOT NULL, [Name] NVARCHAR(120), PRIMARY KEY ([MediaTypeId]));
-CREATE TABLE [Playlist]( [PlaylistId] INTEGER NOT NULL, [Name] NVARCHAR(120), PRIMARY KEY ([PlaylistId]));
-CREATE TABLE [PlaylistTrack]( [PlaylistId] INTEGER NOT NULL, [TrackId] INTEGER NOT NULL, PRIMARY KEY ([PlaylistId], [TrackId]), FOREIGN KEY ([PlaylistId]) REFERENCES [Playlist] ([PlaylistId]), FOREIGN KEY ([TrackId]) REFERENCES [Track] ([TrackId]));
-CREATE TABLE [Track]( [TrackId] INTEGER NOT NULL, [Name] NVARCHAR(200) NOT NULL, [AlbumId] INTEGER, [MediaTypeId] INTEGER NOT NULL, [GenreId] INTEGER, [Composer] NVARCHAR(220), [Milliseconds] INTEGER NOT NULL, [Bytes] INTEGER, [UnitPrice] NUMERIC(10,2) NOT NULL, PRIMARY KEY ([TrackId]), FOREIGN KEY ([AlbumId]) REFERENCES [Album] ([AlbumId]), FOREIGN KEY ([GenreId]) REFERENCES [Genre] ([GenreId]), FOREIGN KEY ([MediaTypeId]) REFERENCES [MediaType] ([MediaTypeId]));
-'''
+# --- LangGraph Definition ---
+workflow = StateGraph(AgentState)
 
-# async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
-#     """
-#     Simple wrapper: LLM writes SQL, then we execute it and return the result.
-#     input_data is expected to contain a 'query' field.
-#     """
-#     query = input_data.get("query")
-#     if not query:
-#         return AgentOutput(task_status="error", response="Input missing 'query' field.")
-#
-#     # Prompt LLM to write a SQL query for the user's question, with schema
-#     prompt = f"""
-# You are an expert SQL assistant. Here is the schema of the database you will query:
-# {CHINOOK_SCHEMA}
-# Given the following question, write a syntactically correct SQLite SQL query. Do not explain, just output the SQL query.
-# Question: {query}
-# SQL Query:
-# """
-#     try:
-#         llm_response = llm.invoke(prompt)
-#         sql_text = llm_response.content.strip()
-#         # Remove code block markers if present
-#         if sql_text.startswith("```sql"):
-#             sql_text = sql_text[6:]
-#         if sql_text.startswith("```"):
-#             sql_text = sql_text[3:]
-#         if sql_text.endswith("```"):
-#             sql_text = sql_text[:-3]
-#         sql_query = sql_text.strip()
-#         # Execute the SQL query
-#         with db._engine.connect() as conn:
-#             result = conn.execute(text(sql_query))
-#             rows = result.fetchall()
-#             columns = result.keys()
-#             # Format output as a table
-#             output = "\t".join(columns) + "\n" + "\n".join(["\t".join(map(str, row)) for row in rows])
-#         return AgentOutput(task_status="completed", response=output)
-#     except Exception as e:
-#         return AgentOutput(task_status="error", response=f"Failed: {str(e)}")
+# Add the single node that performs SQL generation and execution
+workflow.add_node("sql_executor_node", generate_and_execute_sql) # Renamed node for clarity
+
+# Set the entry point and connect it directly to the END
+workflow.set_entry_point("sql_executor_node")
+workflow.add_edge("sql_executor_node", END) # Simple direct path: Node -> End
+
+# Compile the graph into a runnable instance
+sql_graph_runnable = workflow.compile() # This is the compiled graph
+
+# --- Define the runnable entry point for the Workflow Server ---
+async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
+    """
+    Runnable wrapper for the SQL Agent to integrate with the Workflow Server.
+    input_data is expected to contain a 'query' field.
+    """
+    query = input_data.get("query")
+    if not query:
+        return AgentOutput(task_status="error", response="Input missing 'query' field.")
+
+    # Initialize the graph state with the incoming query
+    initial_state = {"query": query, "response": "", "error": ""}
+
+    try:
+        # Invoke the compiled LangGraph with the initial state.
+        final_state = await sql_graph_runnable.ainvoke(initial_state)
+
+        # Determine the final output status and response based on the graph's final state
+        if final_state.get("error"):
+            return AgentOutput(task_status="error", response=final_state["error"])
+        elif final_state.get("response"):
+            return AgentOutput(task_status="completed", response=final_state["response"])
+        else:
+            return AgentOutput(task_status="error", response="Agent completed without a clear response or error.")
+
+    except Exception as e:
+        return AgentOutput(task_status="error", response=f"LangGraph execution failed: {str(e)}")
 
 # --- Local Testing Block ---
 if __name__ == "__main__":
-    print("--- Testing table_qa_agent locally ---")
-    local_input = {"query": "Who is from Chicago?"}
-    async def run_local_test():
-        result = await table_qa_agent(local_input)
-        print("\nLocal Test Result:")
+    print("--- Testing sql_agent_runnable locally ---")
+
+    # Test case 1: Simple non-database query (direct response)
+    async def test_simple_query():
+        local_input = {"query": "What is the purpose of this agent?"}
+        result = await sql_agent_runnable(local_input)
+        print("\nLocal Test Result (Simple Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(run_local_test())
+    asyncio.run(test_simple_query())
 
-    # You can add more local tests here:
-    # local_input_2 = {"query": "Show me the total sales for each customer."}
-    # asyncio.run(sql_agent_runnable(local_input_2))
+    # Test case 2: SQL query for toy database
+    async def test_sql_query():
+        local_input = {"query": "SELECT name FROM users LIMIT 1;"}
+        result = await sql_agent_runnable(local_input)
+        print("\nLocal Test Result (SQL Query):")
+        print(f"Task Status: {result.task_status}")
+        print(f"Response: {result.response}")
+    asyncio.run(test_sql_query())
+
+    # Test case 3: Another SQL query for toy database
+    async def test_another_sql_query():
+        local_input = {"query": "SELECT product_name, price FROM products WHERE stock > 100;"}
+        result = await sql_agent_runnable(local_input)
+        print("\nLocal Test Result (Another SQL Query):")
+        print(f"Task Status: {result.task_status}")
+        print(f"Response: {result.response}")
+    asyncio.run(test_another_sql_query())
+
+    # Test case 4: Unsupported SQL query for toy database
+    async def test_unsupported_sql_query():
+        local_input = {"query": "SELECT * FROM orders;"} # This table doesn't exist in toy DB
+        result = await sql_agent_runnable(local_input)
+        print("\nLocal Test Result (Unsupported SQL Query):")
+        print(f"Task Status: {result.task_status}")
+        print(f"Response: {result.response}")
+    asyncio.run(test_unsupported_sql_query())
