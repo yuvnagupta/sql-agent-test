@@ -1,13 +1,21 @@
+# /Users/yuvnagupta/Desktop/sql-agent-test/pyproject.toml
+
 [tool.poetry]
-name = "sql-agent-test"
+name = "sql_agent" 
 version = "0.1.0"
-description = "SQL Agent for Kairo Framework"
+description = "SQL Agent"
 authors = ["Your Name <you@example.com>"]
-readme = "README.md" # Poetry requires a README.md by default
+readme = "README.md" # Ensure README.md exists in the same directory as pyproject.toml
+
+# Define where your actual Python package code is located
+# If your main.py is inside /Users/yuvnagupta/Desktop/sql-agent-test/sql_agent/
+packages = [
+    { include = "sql_agent" } # <--- This tells Poetry to include the 'sql_agent' folder as the package
+]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.14"
-# List your direct dependencies here, matching requirements.txt
+# List your direct dependencies here, matching your requirements.txt
 langchain-openai = ">=0.3.3"
 langchain-community = ">=0.1.3"
 langchain-core = ">=0.3.58"
