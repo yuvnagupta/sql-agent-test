@@ -1,23 +1,15 @@
-# sql_agent/main.py
-
 import asyncio
 import os
 from typing import Any, Dict, Literal
 
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
-# Removed: from langchain_community.utilities import SQLDatabase
-# Removed: from sqlalchemy import text
 from langchain_core.prompts import PromptTemplate
 from pathlib import Path
 from pydantic import BaseModel
-# Removed: from langchain_community.agent_toolkits import SQLDatabaseToolkit
-# Removed: from langchain_core.agents import AgentAction, AgentFinish
-# Removed: from langchain_core.messages import HumanMessage
 
 # --- LangGraph specific imports ---
-from langgraph.graph import StateGraph, END # Use END for a simple direct path
-#from langgraph.graph.graph import CompiledGraph
+from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
 # Load environment variables from .env file
@@ -34,6 +26,7 @@ class AgentState(TypedDict):
     query: str
     response: str
     error: str
+    task_status: str
 
 # --- Agent Initialization (Module-level for Workflow Server) ---
 
@@ -115,14 +108,12 @@ def execute_toy_sql(sql_query: str) -> str:
     return f"{header_str}\n{rows_str}"
 
 
-# --- AgentOutput is now used as the state for the workflow ---
-
 # --- LangGraph Node ---
-async def generate_and_execute_sql(state: AgentOutput) -> AgentOutput:
+async def generate_and_execute_sql(state: AgentState) -> AgentState:
     """
     LangGraph node: Takes a natural language query and outputs the answer based only on the simple table in the system prompt.
     """
-    query = state.response  # We'll use the 'response' field to carry the query
+    query = state.get("query", "")
 
     # Define a simple table (3 rows, 3 columns) as a string for the system prompt
     table = (
@@ -135,25 +126,36 @@ async def generate_and_execute_sql(state: AgentOutput) -> AgentOutput:
 
     prompt = f"""
 You are a helpful assistant. Here is a table you can use to answer questions:\n\n{table}\n\nAnswer the following question using only the information in the table above. If the answer is not present, say 'I don't know'.\n\nQuestion: {query}\nAnswer:\n"""
+    
     try:
         llm_response = llm.invoke(prompt)
         answer = llm_response.content.strip()
-        return AgentOutput(task_status="completed", response=answer)
+        return {
+            "query": query,
+            "response": answer,
+            "error": "",
+            "task_status": "completed"
+        }
     except Exception as e:
-        return AgentOutput(task_status="error", response=f"LLM failed: {str(e)}")
+        return {
+            "query": query,
+            "response": "",
+            "error": f"LLM failed: {str(e)}",
+            "task_status": "error"
+        }
 
 # --- LangGraph Definition ---
-workflow = StateGraph(AgentOutput)
+workflow = StateGraph(AgentState)
 
 # Add the single node that performs SQL generation and execution
-workflow.add_node("sql_executor_node", generate_and_execute_sql) # Renamed node for clarity
+workflow.add_node("sql_executor_node", generate_and_execute_sql)
 
 # Set the entry point and connect it directly to the END
 workflow.set_entry_point("sql_executor_node")
-workflow.add_edge("sql_executor_node", END) # Simple direct path: Node -> End
+workflow.add_edge("sql_executor_node", END)
 
 # Compile the graph into a runnable instance
-sql_graph_runnable = workflow.compile() # This is the compiled graph
+sql_graph_runnable = workflow.compile()
 
 # --- Define the runnable entry point for the Workflow Server ---
 async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
@@ -165,8 +167,13 @@ async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
     if not query:
         return AgentOutput(task_status="error", response="Input missing 'query' field.")
 
-    # Initialize the graph state with the incoming query in the response field
-    initial_state = AgentOutput(task_status="input_required", response=query)
+    # Initialize the graph state with the incoming query
+    initial_state = {
+        "query": query,
+        "response": "",
+        "error": "",
+        "task_status": "input_required"
+    }
 
     try:
         # Invoke the compiled LangGraph with the initial state.
@@ -196,29 +203,29 @@ if __name__ == "__main__":
         print(f"Response: {result.response}")
     asyncio.run(test_simple_query())
 
-    # Test case 2: SQL query for toy database
-    async def test_sql_query():
-        local_input = {"query": "SELECT name FROM users LIMIT 1;"}
+    # Test case 2: Query about users
+    async def test_users_query():
+        local_input = {"query": "List all users in the database."}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (SQL Query):")
+        print("\nLocal Test Result (Users Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_sql_query())
+    asyncio.run(test_users_query())
 
-    # Test case 3: Another SQL query for toy database
-    async def test_another_sql_query():
-        local_input = {"query": "SELECT product_name, price FROM products WHERE stock > 100;"}
+    # Test case 3: Query about specific user
+    async def test_specific_user_query():
+        local_input = {"query": "What is Alice's age?"}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Another SQL Query):")
+        print("\nLocal Test Result (Specific User Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_another_sql_query())
+    asyncio.run(test_specific_user_query())
 
-    # Test case 4: Unsupported SQL query for toy database
-    async def test_unsupported_sql_query():
-        local_input = {"query": "SELECT * FROM orders;"} # This table doesn't exist in toy DB
+    # Test case 4: Query that can't be answered
+    async def test_unsupported_query():
+        local_input = {"query": "What is the weather like?"}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Unsupported SQL Query):")
+        print("\nLocal Test Result (Unsupported Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_unsupported_sql_query())
+    asyncio.run(test_unsupported_query())
