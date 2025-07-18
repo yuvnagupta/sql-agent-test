@@ -1,7 +1,7 @@
 # /Users/yuvnagupta/Desktop/sql-agent-test/pyproject.toml
 
 [tool.poetry]
-name = "sql_agent" 
+name = "sql-agent" 
 version = "0.1.0"
 description = "SQL Agent"
 authors = ["Your Name <you@example.com>"]
@@ -10,7 +10,7 @@ readme = "README.md" # Ensure README.md exists in the same directory as pyprojec
 # Define where your actual Python package code is located
 # If your main.py is inside /Users/yuvnagupta/Desktop/sql-agent-test/sql_agent/
 packages = [
-    { include = "sql_agent" } # <--- This tells Poetry to include the 'sql_agent' folder as the package
+    { include = "sql-agent" } # <--- This tells Poetry to include the 'sql_agent' folder as the package
 ]
 
 [tool.poetry.dependencies]
