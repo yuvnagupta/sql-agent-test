@@ -1,21 +1,20 @@
-[project]
+[tool.poetry]
 name = "sql-agent-test"
 version = "0.1.0"
-description = "A simple agent that answers questions about a small table or generates and executes SQL queries on a SQLite Chinook database."
-authors = [
-    {name="Your Name", email="your.email@example.com"}
-]
-readme = "README.md"
-requires-python = ">=3.9.0,<4.0"
-dependencies = [
-    "langchain >= 0.3.17",
-    "langchain-community >= 0.1.3",
-    "langchain-openai >= 0.3.3",
-    "python-dotenv >= 1.0.0",
-    "sqlalchemy >= 1.4.0",
-    "pydantic >= 2.0"
-]
+description = "SQL Agent for Kairo Framework"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md" # Poetry requires a README.md by default
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+# List your direct dependencies here, matching requirements.txt
+langchain-openai = ">=0.3.3"
+langchain-community = ">=0.1.3"
+langchain-core = ">=0.3.58"
+python-dotenv = ">=1.0.0"
+sqlalchemy = ">=1.4.0"
+pydantic = ">=2.0"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
