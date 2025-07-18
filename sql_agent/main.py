@@ -159,35 +159,43 @@ workflow.set_entry_point("sql_executor_node")
 workflow.add_edge("sql_executor_node", END) # Simple direct path: Node -> End
 
 # Compile the graph into a runnable instance
-sql_graph_runnable = workflow.compile() # This is the compiled graph
+compiled_graph = workflow.compile() # This is the compiled graph
 
 # --- Define the runnable entry point for the Workflow Server ---
-async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
+async def sql_graph_runnable(input_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Runnable wrapper for the SQL Agent to integrate with the Workflow Server.
-    input_data is expected to contain a 'query' field.
+    Main runnable function that the workflow server will call.
+    This function ensures the output matches the expected schema.
     """
     query = input_data.get("query")
     if not query:
-        return AgentOutput(task_status="error", response="Input missing 'query' field.")
+        return {"task_status": "error", "response": "Input missing 'query' field."}
 
     # Initialize the graph state with the incoming query
     initial_state = {"query": query, "response": "", "error": ""}
 
     try:
         # Invoke the compiled LangGraph with the initial state.
-        final_state = await sql_graph_runnable.ainvoke(initial_state)
+        final_state = await compiled_graph.ainvoke(initial_state)
 
         # Determine the final output status and response based on the graph's final state
         if final_state.get("error"):
-            return AgentOutput(task_status="error", response=final_state["error"])
+            return {"task_status": "error", "response": final_state["error"]}
         elif final_state.get("response"):
-            return AgentOutput(task_status="completed", response=final_state["response"])
+            return {"task_status": "completed", "response": final_state["response"]}
         else:
-            return AgentOutput(task_status="error", response="Agent completed without a clear response or error.")
+            return {"task_status": "error", "response": "Agent completed without a clear response or error."}
 
     except Exception as e:
-        return AgentOutput(task_status="error", response=f"LangGraph execution failed: {str(e)}")
+        return {"task_status": "error", "response": f"LangGraph execution failed: {str(e)}"}
+
+# --- Alternative function that returns AgentOutput (for testing) ---
+async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
+    """
+    Alternative runnable wrapper that returns AgentOutput object.
+    """
+    result = await sql_graph_runnable(input_data)
+    return AgentOutput(task_status=result["task_status"], response=result["response"])
 
 # --- Local Testing Block ---
 if __name__ == "__main__":
