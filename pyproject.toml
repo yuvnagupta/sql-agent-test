@@ -1,5 +1,5 @@
 [project]
-name = "sql-agent-test"
+name = "sql-agent"
 version = "0.1.0"
 description = "A simple agent that answers questions about a small table using an LLM."
 authors = [
