@@ -115,12 +115,14 @@ def execute_toy_sql(sql_query: str) -> str:
     return f"{header_str}\n{rows_str}"
 
 
+# --- AgentOutput is now used as the state for the workflow ---
+
 # --- LangGraph Node ---
-async def generate_and_execute_sql(state: AgentState) -> AgentState:
+async def generate_and_execute_sql(state: AgentOutput) -> AgentOutput:
     """
     LangGraph node: Takes a natural language query and outputs the answer based only on the simple table in the system prompt.
     """
-    query = state["query"]
+    query = state.response  # We'll use the 'response' field to carry the query
 
     # Define a simple table (3 rows, 3 columns) as a string for the system prompt
     table = (
@@ -132,24 +134,16 @@ async def generate_and_execute_sql(state: AgentState) -> AgentState:
     )
 
     prompt = f"""
-You are a helpful assistant. Here is a table you can use to answer questions:
-
-{table}
-
-Answer the following question using only the information in the table above. If the answer is not present, say 'I don't know'.
-
-Question: {query}
-Answer:
-"""
+You are a helpful assistant. Here is a table you can use to answer questions:\n\n{table}\n\nAnswer the following question using only the information in the table above. If the answer is not present, say 'I don't know'.\n\nQuestion: {query}\nAnswer:\n"""
     try:
         llm_response = llm.invoke(prompt)
         answer = llm_response.content.strip()
-        return {"response": answer, "query": query, "error": ""}
+        return AgentOutput(task_status="completed", response=answer)
     except Exception as e:
-        return {"response": "", "query": query, "error": f"LLM failed: {str(e)}"}
+        return AgentOutput(task_status="error", response=f"LLM failed: {str(e)}")
 
 # --- LangGraph Definition ---
-workflow = StateGraph(AgentState)
+workflow = StateGraph(AgentOutput)
 
 # Add the single node that performs SQL generation and execution
 workflow.add_node("sql_executor_node", generate_and_execute_sql) # Renamed node for clarity
@@ -171,8 +165,8 @@ async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
     if not query:
         return AgentOutput(task_status="error", response="Input missing 'query' field.")
 
-    # Initialize the graph state with the incoming query
-    initial_state = {"query": query, "response": "", "error": ""}
+    # Initialize the graph state with the incoming query in the response field
+    initial_state = AgentOutput(task_status="input_required", response=query)
 
     try:
         # Invoke the compiled LangGraph with the initial state.
