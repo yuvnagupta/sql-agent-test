@@ -1,7 +1,7 @@
 [project]
-name = "sql-agent"
+name = "sql-agent-test"
 version = "0.1.0"
-description = "A simple agent that answers questions about a small table using an LLM."
+description = "A SQL agent that answers questions about the ClickHouse database using LLM."
 authors = [
     {name="Your Name", email="your.email@example.com"}
 ]
@@ -10,8 +10,12 @@ requires-python = ">=3.9.0,<4.0"
 dependencies = [
     "langchain >= 0.3.17",
     "langchain-openai >= 0.3.3",
+    "langchain-community >= 0.0.13",
     "python-dotenv >= 1.0.0",
-    "pydantic >= 2.0"
+    "pydantic >= 2.0",
+    "langgraph >= 0.0.17",
+    "typing-extensions >= 4.0.0",
+    "pandas >= 2.0.0"
 ]
 
 [build-system]
