@@ -1,5 +1,5 @@
 [project]
-name = "sql-agent-test"
+name = "sql-agent"
 version = "0.1.0"
 description = "A SQL agent that answers questions about the ClickHouse database using LLM."
 authors = [
