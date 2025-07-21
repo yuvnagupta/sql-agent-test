@@ -7,6 +7,9 @@ from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from pathlib import Path
 from pydantic import BaseModel
+import sqlite3
+# SQL database functionality
+from langchain_community.utilities import SQLDatabase
 
 # --- LangGraph specific imports ---
 from langgraph.graph import StateGraph, END
@@ -38,101 +41,121 @@ llm = AzureChatOpenAI(
     temperature=0,
 )
 
-# --- IN-MEMORY TOY DATABASE ---
-# This replaces the Chinook.db connection
-TOY_DATABASE_SCHEMA = """
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    age INTEGER,
-    city TEXT
-);
+# --- ClickHouse SQLite Database Connection ---
+CLICKHOUSE_DB_PATH = os.path.join(os.path.dirname(__file__), "clickhouse.db")
+db = SQLDatabase.from_uri(f"sqlite:///{CLICKHOUSE_DB_PATH}")
 
-CREATE TABLE products (
-    product_id INTEGER PRIMARY KEY,
-    product_name TEXT NOT NULL,
-    price REAL,
-    stock INTEGER
-);
-
--- Sample Data (for reference, actual data handled in the code below)
-INSERT INTO users (id, name, age, city) VALUES (1, 'Alice', 30, 'New York');
-INSERT INTO users (id, name, age, city) VALUES (2, 'Bob', 24, 'Los Angeles');
-INSERT INTO users (id, name, age, city) VALUES (3, 'Charlie', 35, 'New York');
-INSERT INTO products (product_id, product_name, price, stock) VALUES (101, 'Laptop', 1200.00, 50);
-INSERT INTO products (product_id, product_name, price, stock) VALUES (102, 'Mouse', 25.00, 200);
+# --- Database Schema and Description ---
+CLICKHOUSE_SCHEMA = """
+CREATE TABLE llm_usage (
+    request_date TEXT,
+    cluster TEXT,
+    namespace TEXT,
+    tenant_id TEXT,
+    bot_id INTEGER,
+    llm_provider TEXT,
+    model TEXT,
+    prompt_name TEXT,
+    trace_id TEXT,
+    duration_ms INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER
+)
 """
 
-# Simple in-memory data for the toy database
-TOY_DATABASE_DATA = {
-    "users": [
-        {"id": 1, "name": "Alice", "age": 30, "city": "New York"},
-        {"id": 2, "name": "Bob", "age": 24, "city": "Los Angeles"},
-        {"id": 3, "name": "Charlie", "age": 35, "city": "New York"},
-    ],
-    "products": [
-        {"product_id": 101, "product_name": "Laptop", "price": 1200.00, "stock": 50},
-        {"product_id": 102, "product_name": "Mouse", "price": 25.00, "stock": 200},
-    ]
-}
+CLICKHOUSE_DESCRIPTION = """
+The llm_usage table contains information about LLM API calls:
+- request_date: When the request was made (timestamp)
+- cluster: The compute cluster that processed the request
+- namespace: The namespace within the cluster
+- tenant_id: Customer/organization identifier
+- bot_id: Unique identifier for the bot
+- llm_provider: Provider of the LLM (e.g., OpenAI, Anthropic, Mistral)
+- model: The specific model used (e.g., GPT-4, Claude-2.1)
+- prompt_name: Type of prompt used
+- trace_id: Unique identifier for the request for tracing
+- duration_ms: Request processing time in milliseconds
+- prompt_tokens: Number of tokens in the prompt
+- completion_tokens: Number of tokens in the completion
+- total_tokens: Total tokens used (prompt + completion)
+"""
 
-# --- Mock SQL Execution Function ---
-# This simulates executing SQL queries against the toy data
-def execute_toy_sql(sql_query: str) -> str:
-    """A very basic mock SQL executor for the toy database."""
-    sql_query = sql_query.lower().strip()
+# --- SQL Query Functions ---
+def get_schema_str():
+    """Get the database schema as a string."""
+    return db.get_table_info()
 
-    # Simple SELECT * FROM users/products logic for demonstration
-    if "select * from users" in sql_query:
-        headers = ["id", "name", "age", "city"]
-        data = TOY_DATABASE_DATA["users"]
-    elif "select * from products" in sql_query:
-        headers = ["product_id", "product_name", "price", "stock"]
-        data = TOY_DATABASE_DATA["products"]
-    elif "select name from users" in sql_query or "select * from users limit" in sql_query:
-        # Example for specific column/limit queries
-        headers = ["name"]
-        data = [{"name": u["name"]} for u in TOY_DATABASE_DATA["users"]]
-        if "limit 1" in sql_query: data = data[:1]
-        elif "limit 2" in sql_query: data = data[:2]
-        elif "limit 3" in sql_query: data = data[:3]
-    elif "select product_name from products" in sql_query:
-        headers = ["product_name"]
-        data = [{"product_name": p["product_name"]} for p in TOY_DATABASE_DATA["products"]]
-    else:
-        return "ERROR: Query not supported by toy database mock, or invalid SQL."
-
-    # Format output as a simple table string
-    header_str = "\t".join(headers)
-    rows_str = "\n".join(["\t".join(map(str, row.values())) for row in data])
-    return f"{header_str}\n{rows_str}"
-
+def run_sql_query(query: str) -> str:
+    """Run a SQL query against the ClickHouse database and return results as a string."""
+    try:
+        result = db.run(query)
+        return result
+    except Exception as e:
+        return f"Error executing SQL query: {str(e)}"
 
 # --- LangGraph Node ---
 async def generate_and_execute_sql(state: AgentState) -> AgentState:
     """
-    LangGraph node: Takes a natural language query and outputs the answer based only on the simple table in the system prompt.
+    LangGraph node: Takes a natural language query and generates/executes SQL against the ClickHouse database.
     """
     query = state.get("query", "")
-
-    # Define a simple table (3 rows, 3 columns) as a string for the system prompt
-    table = (
-        "| id | name   | age | city        |\n"
-        "|----|--------|-----|-------------|\n"
-        "| 1  | Alice  | 30  | New York    |\n"
-        "| 2  | Bob    | 24  | Los Angeles |\n"
-        "| 3  | Charlie| 35  | New York    |"
-    )
-
-    prompt = f"""
-You are a helpful assistant. Here is a table you can use to answer questions:\n\n{table}\n\nAnswer the following question using only the information in the table above. If the answer is not present, say 'I don't know'.\n\nQuestion: {query}\nAnswer:\n"""
     
     try:
-        llm_response = llm.invoke(prompt)
-        answer = llm_response.content.strip()
+        schema = get_schema_str()
+        
+        # Create a prompt that instructs the LLM to generate SQL
+        sql_generation_prompt = f"""
+You are an expert SQL assistant. Given a question, create a syntactically correct SQLite query to answer it.
+
+Database schema:
+{schema}
+
+Database description:
+{CLICKHOUSE_DESCRIPTION}
+
+Given the question, write a syntactically correct SQLite SQL query. Do not explain, just output the SQL query.
+Unless the user specifies a specific number of examples they wish to obtain, always limit your query to at most 5 results.
+
+Question: {query}
+SQL Query:
+"""
+        # Generate SQL using LLM
+        sql_response = llm.invoke(sql_generation_prompt)
+        sql_query = sql_response.content.strip()
+        
+        # Clean up SQL query (remove markdown code blocks if present)
+        if sql_query.startswith("```sql"):
+            sql_query = sql_query[6:]
+        if sql_query.startswith("```"):
+            sql_query = sql_query[3:]
+        if sql_query.endswith("```"):
+            sql_query = sql_query[:-3]
+        sql_query = sql_query.strip()
+        
+        # Execute the SQL query
+        query_result = run_sql_query(sql_query)
+            
+        # Generate a natural language response using the query result
+        response_prompt = f"""
+You are a helpful database assistant. Below is a question and the result of a SQL query that answers the question.
+Please provide a clear, concise response to the question using the SQL query result.
+
+Question: {query}
+
+SQL Query:
+{sql_query}
+
+Query Result:
+{query_result}
+
+Response:
+"""
+        final_response = llm.invoke(response_prompt).content
+        
         return {
             "query": query,
-            "response": answer,
+            "response": final_response,
             "error": "",
             "task_status": "completed"
         }
@@ -140,7 +163,7 @@ You are a helpful assistant. Here is a table you can use to answer questions:\n\
         return {
             "query": query,
             "response": "",
-            "error": f"LLM failed: {str(e)}",
+            "error": f"Error: {str(e)}",
             "task_status": "error"
         }
 
@@ -194,38 +217,47 @@ async def sql_agent_runnable(input_data: Dict[str, Any]) -> AgentOutput:
 if __name__ == "__main__":
     print("--- Testing sql_agent_runnable locally ---")
 
-    # Test case 1: Simple non-database query (direct response)
+    # Test case 1: Simple database information query
     async def test_simple_query():
-        local_input = {"query": "What is the purpose of this agent?"}
+        local_input = {"query": "What is the schema of the database?"}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Simple Query):")
+        print("\nLocal Test Result (Schema Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
     asyncio.run(test_simple_query())
 
-    # Test case 2: Query about users
-    async def test_users_query():
-        local_input = {"query": "List all users in the database."}
+    # Test case 2: LLM provider analysis
+    async def test_llm_providers_query():
+        local_input = {"query": "What are the top 5 LLM providers by total token usage?"}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Users Query):")
+        print("\nLocal Test Result (LLM Providers Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_users_query())
+    asyncio.run(test_llm_providers_query())
 
-    # Test case 3: Query about specific user
-    async def test_specific_user_query():
-        local_input = {"query": "What is Alice's age?"}
+    # Test case 3: Model-specific query
+    async def test_model_query():
+        local_input = {"query": "What is the average response time for Claude-2.1 model?"}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Specific User Query):")
+        print("\nLocal Test Result (Model Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_specific_user_query())
+    asyncio.run(test_model_query())
 
-    # Test case 4: Query that can't be answered
-    async def test_unsupported_query():
-        local_input = {"query": "What is the weather like?"}
+    # Test case 4: Tenant analysis
+    async def test_tenant_query():
+        local_input = {"query": "Show me the top 3 tenants with the highest token usage."}
         result = await sql_agent_runnable(local_input)
-        print("\nLocal Test Result (Unsupported Query):")
+        print("\nLocal Test Result (Tenant Analysis Query):")
         print(f"Task Status: {result.task_status}")
         print(f"Response: {result.response}")
-    asyncio.run(test_unsupported_query())
+    asyncio.run(test_tenant_query())
+
+    # Test case 5: Prompt type analysis
+    async def test_prompt_query():
+        local_input = {"query": "What prompt types are used and which one has the highest average completion tokens?"}
+        result = await sql_agent_runnable(local_input)
+        print("\nLocal Test Result (Prompt Analysis Query):")
+        print(f"Task Status: {result.task_status}")
+        print(f"Response: {result.response}")
+    asyncio.run(test_prompt_query())
